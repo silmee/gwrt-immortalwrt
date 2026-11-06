@@ -1,0 +1,176 @@
+name: GWRT x86-64 build (honk + Lucky)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (YYMMDD-NN), empty = today-01'
+        required: false
+        default: ''
+      honk_tag:
+        description: 'honk upstream git tag (sources cloned into feeds/daeuniverse/honk/src)'
+        required: false
+        default: 'v0.1.0-beta.5'
+      honk_version:
+        description: 'honk package version (apk spelling, underscore before pre-release)'
+        required: false
+        default: '0.1.0_beta5'
+      lucky_ver:
+        description: 'Lucky release version (gdy666/lucky)'
+        required: false
+        default: '3.5.0'
+      release:
+        description: 'Publish images to GitHub Releases'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gwrt-x86-64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          sudo apt-get clean
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential clang llvm flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev libelf-dev libudev-dev libpcap-dev libcap-dev \
+            python3-setuptools rsync unzip zlib1g-dev file wget curl swig xz-utils \
+            libtool bzip2 dwarves pkg-config cmake zstd libclang-dev libbpf-dev
+          # bpf.mk (honk / daed) needs unversioned llvm tools in PATH
+          LLVM_BIN="$(dirname "$(readlink -f "$(command -v clang)")")"
+          for t in llvm-strip llc opt llvm-dis; do
+            [ -x "$LLVM_BIN/$t" ] && sudo ln -sf "$LLVM_BIN/$t" "/usr/local/bin/$t"
+          done
+          command -v llvm-strip && llvm-strip --version | head -1
+
+      - name: Install Rust toolchain and bpf-linker (needed by honk)
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source "$HOME/.cargo/env"
+          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
+          rustup toolchain install nightly-2026-10-20 --profile minimal --component rust-src,llvm-tools
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bpf-linker.tar.zst" \
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          echo "10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450  $RUNNER_TEMP/bpf-linker.tar.zst" | sha256sum -c -
+          zstd -dc "$RUNNER_TEMP/bpf-linker.tar.zst" | tar -xf - -C "$HOME/.cargo/bin"
+          chmod +x "$HOME/.cargo/bin/bpf-linker"
+          "$HOME/.cargo/bin/bpf-linker" --version
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: gwrt-x86-dl-${{ hashFiles('rules.mk', 'Config.in', 'include/**') }}
+          restore-keys: |
+            gwrt-x86-dl-
+
+      - name: Fetch Lucky binary
+        run: |
+          set -euo pipefail
+          VER="${{ inputs.lucky_ver }}"
+          URL="https://github.com/gdy666/lucky/releases/download/v${VER}/lucky_${VER}_Linux_x86_64.tar.gz"
+          mkdir -p package/lucky/files
+          curl -fL --retry 5 --retry-delay 5 -o /tmp/lucky.tar.gz "$URL"
+          tar -xzf /tmp/lucky.tar.gz -C /tmp lucky
+          install -m 0755 /tmp/lucky package/lucky/files/lucky
+          ls -l package/lucky/files/lucky
+          file package/lucky/files/lucky
+
+      - name: Update and install feeds
+        run: |
+          set -euo pipefail
+          echo "src-git daeuniverse https://github.com/daeuniverse/openwrt-packages.git^fcbc57abdec03713f877ed855d2c56a17429f35c" >> feeds.conf.default
+          ./scripts/feeds update -a
+          # honk's Makefile expects the upstream sources next to it in ./src
+          git clone --depth 1 --branch "${{ inputs.honk_tag }}" https://github.com/daeuniverse/honk.git feeds/daeuniverse/honk/src
+          ./scripts/feeds install -a
+          # python3-base needs libffi headers first
+          sed -i 's|^  DEPENDS:=+libpython3$|  DEPENDS:=+libpython3 +libffi|' \
+              feeds/packages/lang/python/python3/Makefile || true
+
+      - name: Generate config
+        run: |
+          set -euo pipefail
+          VER="${{ inputs.version }}"
+          [ -n "$VER" ] || VER="$(date -u +%y%m%d)-01"
+          echo "VER=$VER" >> "$GITHUB_ENV"
+
+          cp config.x86-64 .config
+
+          # seal honk version into the feed Makefile defaults
+          sed -i "s|^HONK_GIT_TAG:=.*|HONK_GIT_TAG:=${{ inputs.honk_tag }}|" feeds/daeuniverse/honk/Makefile
+          sed -i "s|0\.1\.0_beta1|${{ inputs.honk_version }}|g" feeds/daeuniverse/honk/Makefile
+          grep -nE 'PKG_VERSION|HONK_GIT_TAG' feeds/daeuniverse/honk/Makefile | head -5
+
+          make defconfig
+          grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)|^CONFIG_TARGET_ROOTFS_PARTSIZE|^CONFIG_PACKAGE_(honk|luci-app-honk|lucky|vmlinux-btf-builtin)' .config
+
+      - name: Build firmware
+        run: |
+          source "$HOME/.cargo/env"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          make -j"$(nproc)" \
+            REVISION="$(git rev-parse --short HEAD)" \
+            CONFIG_VERSION_DIST=GWRT \
+            CONFIG_VERSION_NUMBER="$VER" 2>&1 | tee build.log \
+          || make -j1 V=s \
+            REVISION="$(git rev-parse --short HEAD)" \
+            CONFIG_VERSION_DIST=GWRT \
+            CONFIG_VERSION_NUMBER="$VER" 2>&1 | tee -a build.log
+
+      - name: Collect images
+        if: success()
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find bin/targets/x86/64 -maxdepth 1 -type f \
+            \( -name '*.img.gz' -o -name '*.img' -o -name '*.efi' -o -name 'kernel.bin' \
+               -o -name '*.manifest' -o -name 'sha256sums' -o -name '*.buildinfo' \) \
+            -exec cp -v {} out/ \;
+          cp .config "out/config-x86-64-${VER}"
+          cp build.log out/ 2>/dev/null || true
+          ls -lh out
+
+      - name: Upload artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gwrt-x86-64-${{ env.VER }}
+          path: out/
+          retention-days: 30
+
+      - name: Publish release
+        if: success() && inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "gwrt-x86-64-${{ env.VER }}" out/* \
+            --title "GWRT x86-64 ${{ env.VER }}" \
+            --notes "自动构建: x86/64 (honk ${{ inputs.honk_tag }} + Lucky ${{ inputs.lucky_ver }}) @ ${{ github.sha }}"
