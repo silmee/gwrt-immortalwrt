@@ -1,0 +1,19 @@
+#!/bin/sh
+# First-boot setup for Lucky: working dir, firewall hole for the Web UI/API,
+# and start the service. Lucky writes lucky.conf itself on first start.
+[ -d /etc/lucky ] || mkdir -p /etc/lucky
+
+# open 16601 (Web UI + API) on WAN and LAN
+uci -q get firewall.lucky >/dev/null || {
+	uci add firewall rule >/dev/null
+	uci set firewall.@rule[-1].name='Allow-Lucky-Web'
+	uci set firewall.@rule[-1].src='*'
+	uci set firewall.@rule[-1].dest_port='16601'
+	uci set firewall.@rule[-1].proto='tcp'
+	uci set firewall.@rule[-1].target='ACCEPT'
+	uci commit firewall
+}
+
+/etc/init.d/lucky enable 2>/dev/null
+/etc/init.d/lucky restart 2>/dev/null
+exit 0
