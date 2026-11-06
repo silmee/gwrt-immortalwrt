@@ -1,0 +1,52 @@
+# GWRT x86/64 build config
+# Target board: Techvision TVI7309X (Intel N5100, UEFI + Legacy BIOS)
+# Plugins: honk (eBPF transparent proxy) + Lucky (reverse proxy / DDNS)
+
+# --- Target: x86/64 Generic ---
+CONFIG_TARGET_x86=y
+CONFIG_TARGET_x86_64=y
+CONFIG_TARGET_x86_64_Generic=y
+
+# --- Image formats: UEFI + Legacy BIOS, gzip compressed ---
+CONFIG_GRUB_IMAGES=y
+CONFIG_GRUB_EFI_IMAGES=y
+CONFIG_TARGET_IMAGES_GZIP=y
+
+# --- Web UI + PPPoE dial-up ---
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-proto-ppp=y
+
+# --- eBPF kernel prerequisites (honk CO-RE / TC-bpf / nftables) ---
+CONFIG_DEVEL=y
+CONFIG_BPF_TOOLCHAIN_HOST=y
+CONFIG_KERNEL_BPF_EVENTS=y
+CONFIG_KERNEL_CGROUP_BPF=y
+CONFIG_KERNEL_DEBUG_INFO=y
+# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
+CONFIG_KERNEL_DEBUG_INFO_BTF=y
+CONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y
+CONFIG_KERNEL_CGROUPS=y
+CONFIG_PACKAGE_kmod-sched-core=y
+CONFIG_PACKAGE_kmod-sched-bpf=y
+CONFIG_PACKAGE_kmod-veth=y
+CONFIG_PACKAGE_kmod-nft-tproxy=y
+CONFIG_PACKAGE_kmod-nft-core=y
+CONFIG_PACKAGE_kmod-nft-queue=y
+CONFIG_PACKAGE_kmod-nfnetlink-queue=y
+CONFIG_PACKAGE_kmod-nf-conntrack=y
+CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
+CONFIG_PACKAGE_v2ray-geoip=y
+CONFIG_PACKAGE_v2ray-geosite=y
+
+# --- Root filesystem 2G ---
+CONFIG_TARGET_ROOTFS_PARTSIZE=2048
+
+# --- honk (eBPF transparent proxy) ---
+CONFIG_PACKAGE_honk=y
+CONFIG_PACKAGE_luci-app-honk=y
+# vmlinux-btf-builtin satisfies the vmlinux-btf dependency on a kernel with
+# native BTF (CONFIG_KERNEL_DEBUG_INFO_BTF=y above)
+CONFIG_PACKAGE_vmlinux-btf-builtin=y
+
+# --- Lucky (reverse proxy / DDNS / port forwarding) ---
+CONFIG_PACKAGE_lucky=y
